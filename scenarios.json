@@ -1,0 +1,307 @@
+{
+  "defaults": {
+    "model": "/mnt/weight/Qwen3-8B",
+    "device": "10",
+    "profile_root": "/home/lingmutian/tmp/profile_dir",
+    "warmup_rounds": 1,
+    "profile_rounds": 3,
+    "environment": {"VLLM_COMPUTE_NANS_IN_LOGITS": "1"},
+    "hot_sampling": {
+      "max_tokens": 16,
+      "temperature": 0.8,
+      "top_p": 0.9,
+      "top_k": 50,
+      "min_p": 0.1,
+      "presence_penalty": 0.2,
+      "frequency_penalty": 0.2,
+      "repetition_penalty": 1.1,
+      "logit_bias": {"0": -1.0, "1": 0.5},
+      "_bad_words_token_ids": [[0], [1, 2]],
+      "repetition_detection": {"max_pattern_size": 5, "min_pattern_size": 2, "min_count": 3},
+      "logprobs": 4,
+      "prompt_logprobs": 5,
+      "logprob_token_ids": [0, 1, 2, 3],
+      "flat_logprobs": true,
+      "structured_outputs": {
+        "json": {
+          "type": "object",
+          "properties": {
+            "answer": {"type": "string"},
+            "confidence": {"type": "number"}
+          },
+          "required": ["answer", "confidence"],
+          "additionalProperties": false
+        }
+      },
+      "ignore_eos": true,
+      "seed": 42
+    },
+    "engine": {
+      "max_model_len": 8192,
+      "enforce_eager": true,
+      "async_scheduling": true,
+      "gpu_memory_utilization": 0.8,
+      "tensor_parallel_size": 1,
+      "max_num_seqs": 64,
+      "seed": 42
+    }
+  },
+  "scenarios": [
+    {
+      "id": "T0",
+      "name": "Dense Prefill + Decode 基线（可选）",
+      "purpose": "可选的基础路径基线；性能热点采集默认使用 T1 及后续专属架构场景。",
+      "skip": true,
+      "expected_operators": [
+        "_prepare_prefill_inputs_kernel", "_prepare_pos_seq_lens_kernel",
+        "_compute_slot_mappings_kernel", "_gather_block_tables_kernel",
+        "_post_update_kernel", "_get_num_sampled_and_rejected_kernel"
+      ],
+      "cases": [
+        {
+          "name": "prefill_heavy",
+          "count": 8,
+          "prompt_tokens": 4096,
+          "prompt_text": "Explain transformer inference and KV cache management in detail. ",
+          "sampling": {"max_tokens": 32, "temperature": 0.0, "ignore_eos": true, "seed": 42}
+        },
+        {
+          "name": "decode_heavy",
+          "count": 40,
+          "prompt_tokens": 256,
+          "prompt_text": "Write a detailed technical article about compiler optimization. ",
+          "sampling": {"max_tokens": 1024, "temperature": 0.0, "ignore_eos": true, "seed": 42}
+        }
+      ]
+    },
+    {
+      "id": "T1",
+      "name": "文本全功能热点",
+      "purpose": "单卡文本模型的统一热点场景：NaN logits 统计、logits 修正、JSON grammar、随机采样与完整 logprob 后处理在同一请求中叠加。",
+      "expected_operators": [
+        "_temperature_kernel", "_gumbel_sample_kernel",
+        "tl_rand64 (helper)", "tl_rand32 (helper)", "gumbel_block_argmax (helper)",
+        "_bad_words_kernel", "_bias_kernel", "_min_p_kernel",
+        "_penalties_kernel", "_bincount_kernel", "_apply_write_kernel",
+        "_topk_topp_kernel", "_topk_log_softmax_kernel", "_ranks_kernel",
+        "_fill_logprob_token_ids_kernel", "_prompt_logprobs_token_ids_kernel",
+        "_expand_idx_mapping_kernel", "_apply_grammar_bitmask_kernel",
+        "_num_nans_kernel"
+      ],
+      "cases": [
+        {
+          "name": "text_hot_all",
+          "count": 64,
+          "prompt_tokens": 256,
+          "prompt_text": "Answer the question as JSON with answer and confidence fields: explain repetition in language models. ",
+          "sampling": {}
+        }
+      ]
+    },
+    {
+      "id": "T5",
+      "name": "Qwen3.5 VL + Hybrid MTP + KV Zero",
+      "purpose": "使用 Qwen3.5 多模态 Hybrid 模型和内置 MTP，在同一真实推理场景中覆盖 M-RoPE position、accepted-token 状态散射与新分配 KV block 清零。",
+      "expected_operators": [
+        "_prepare_rope_positions_kernel",
+        "_scatter_num_accepted_kernel",
+        "_zero_kv_blocks_kernel",
+        "_prepare_input_buffers_kernel",
+        "_prepare_input_hidden_states_and_embeddings_kernel",
+        "_pad_trailing_draft_slots_kernel",
+        "_cache_inputs_kernel",
+        "_shift_input_ids_kernel",
+        "_shift_input_embeds_kernel"
+      ],
+      "model": "/mnt/weight/Qwen3.5-35B-A3B-w8a8-mtp",
+      "image_path": "/mnt/weight/MiniMax/MiniMax-M3/figures/benchmark.jpeg",
+      "device": "10,11",
+      "replace_hot_sampling": true,
+      "engine": {
+        "max_model_len": 4096,
+        "tensor_parallel_size": 2,
+        "quantization": "ascend",
+        "enable_expert_parallel": false,
+        "distributed_executor_backend": "mp",
+        "gpu_memory_utilization": 0.9,
+        "max_num_seqs": 8,
+        "speculative_config": {
+          "method": "qwen3_5_mtp",
+          "num_speculative_tokens": 3,
+          "enforce_eager": true
+        }
+      },
+      "cases": [
+        {
+          "name": "qwen35_vl_mtp",
+          "count": 8,
+          "prompt_tokens": 0,
+          "messages": [
+            {
+              "role": "user",
+              "content": [
+                {"type": "image"},
+                {"type": "text", "text": "Describe the image and explain the spatial relationships between the main objects."}
+              ]
+            }
+          ],
+          "sampling": {
+            "max_tokens": 16,
+            "temperature": 0.0,
+            "ignore_eos": true,
+            "seed": 42
+          }
+        }
+      ]
+    },
+    {
+      "id": "T6",
+      "name": "Decode Context Parallel",
+      "purpose": "至少双卡并设置 DCP=2，覆盖各 CP rank 的本地 sequence length 计算。",
+      "expected_operators": ["_dcp_local_seq_lens_kernel"],
+      "device": "5,6",
+      "skip": true,
+      "engine": {"decode_context_parallel_size": 2},
+      "cases": [
+        {
+          "name": "dcp_decode",
+          "count": 16,
+          "prompt_tokens": 256,
+          "prompt_text": "Write a long technical explanation. ",
+          "sampling": {}
+        }
+      ]
+    },
+    {
+      "id": "T7",
+      "name": "EAGLE3 Spec Decode",
+      "purpose": "使用 Qwen3-8B 与匹配的 EAGLE3 drafter，覆盖 draft prefill、draft decode、draft state 更新和 sampled/draft token 合并。",
+      "expected_operators": [
+        "speculator._prepare_prefill_inputs_kernel", "_prepare_decode_inputs_kernel",
+        "_update_draft_inputs_kernel", "_combine_sampled_and_draft_tokens_kernel"
+      ],
+      "model": "/mnt/weight/Qwen3-8B",
+      "replace_hot_sampling": true,
+      "engine": {
+        "speculative_config": {
+          "model": "/mnt/weight/Qwen3-8B-speculator.eagle3",
+          "method": "eagle3",
+          "num_speculative_tokens": 3
+        }
+      },
+      "cases": [
+        {
+          "name": "eagle_decode",
+          "count": 8,
+          "prompt_tokens": 256,
+          "prompt_text": "Explain speculative decoding in detail. ",
+          "sampling": {"max_tokens": 16, "temperature": 0.0, "ignore_eos": true, "seed": 42}
+        }
+      ]
+    },
+    {
+      "id": "T8",
+      "name": "DFlash Parallel Draft",
+      "purpose": "使用 Qwen3-8B 与匹配的 DFlash drafter 产生 accepted/rejected draft tokens，覆盖 DFlash 输入、统计、拒绝、重采样、插入和展平。",
+      "expected_operators": [
+        "_prepare_dflash_inputs_kernel_ascend", "_compute_block_stats_kernel",
+        "_probabilistic_rejection_kernel",
+        "_resample_kernel", "_insert_resampled_kernel", "_flatten_sampled_kernel",
+        "_combine_sampled_and_draft_tokens_kernel"
+      ],
+      "model": "/mnt/weight/Qwen3-8B",
+      "replace_hot_sampling": true,
+      "engine": {
+        "speculative_config": {
+          "model": "/mnt/weight/Qwen3-8B-DFlash-b16",
+          "method": "dflash",
+          "num_speculative_tokens": 8
+        }
+      },
+      "cases": [
+        {
+          "name": "dflash_decode",
+          "count": 8,
+          "prompt_tokens": 256,
+          "prompt_text": "Develop a long reasoning chain about compiler optimization. ",
+          "sampling": {
+            "max_tokens": 16,
+            "temperature": 0.0,
+            "logprobs": 4,
+            "ignore_eos": true,
+            "seed": 42
+          }
+        }
+      ]
+    },
+    {
+      "id": "T9",
+      "name": "Thinking Budget Reasoning",
+      "purpose": "启用 Qwen reasoning chat template 和 thinking_token_budget，覆盖 reasoning token budget 下的 marker cache 更新和 logits 强制结束逻辑。",
+      "expected_operators": [
+        "_update_committed_marker_cache_kernel",
+        "_thinking_budget_kernel"
+      ],
+      "replace_hot_sampling": true,
+      "enable_thinking": true,
+      "engine": {
+        "reasoning_parser": "qwen3"
+      },
+      "cases": [
+        {
+          "name": "qwen3_thinking_budget",
+          "count": 16,
+          "prompt_tokens": 0,
+          "messages": [
+            {
+              "role": "user",
+              "content": "Solve this step by step, but keep the reasoning concise: if a compiler pass reduces memory traffic by 18% and kernel launch overhead by 7%, which bottleneck should we investigate next?"
+            }
+          ],
+          "sampling": {
+            "max_tokens": 128,
+            "temperature": 0.6,
+            "top_p": 0.95,
+            "thinking_token_budget": 32,
+            "ignore_eos": true,
+            "seed": 42
+          }
+        }
+      ]
+    },
+    {
+      "id": "T10",
+      "name": "Mamba Hybrid Align",
+      "purpose": "使用 Mamba/SSM hybrid 模型并开启 align cache mode，通过较长 prompt 和 decode 跨 block boundary，覆盖 Mamba state align preprocess。",
+      "skip": true,
+      "expected_operators": [
+        "preprocess_mamba_align_fused_kernel"
+      ],
+      "model": "${MRV2_MAMBA_MODEL}",
+      "replace_hot_sampling": true,
+      "engine": {
+        "max_model_len": 2048,
+        "max_num_batched_tokens": 2048,
+        "max_num_seqs": 16,
+        "dtype": "float16",
+        "mamba_cache_mode": "align",
+        "mamba_ssm_cache_dtype": "float16",
+        "enforce_eager": true
+      },
+      "cases": [
+        {
+          "name": "mamba_align_long_decode",
+          "count": 8,
+          "prompt_tokens": 1536,
+          "prompt_text": "You are reading a compact synthetic operations ledger. Use only the rows below when answering the final question. Row 001 moves cargo across zones; priority changes with route state. ",
+          "sampling": {
+            "max_tokens": 128,
+            "temperature": 0.0,
+            "ignore_eos": true,
+            "seed": 42
+          }
+        }
+      ]
+    }
+  ]
+}
