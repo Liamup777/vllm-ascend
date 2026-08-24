@@ -71,6 +71,12 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Output file for NPU Triton launch shape tracing. Set this to a writable
+    # path to override the default /tmp/vllm_ascend_triton_kernel_shapes.txt.
+    "VLLM_ASCEND_TRITON_SHAPE_DUMP_PATH": lambda: os.getenv(
+        "VLLM_ASCEND_TRITON_SHAPE_DUMP_PATH",
+        "/tmp/vllm_ascend_triton_kernel_shapes.txt",
+    ),
 }
 
 # end-env-vars-definition

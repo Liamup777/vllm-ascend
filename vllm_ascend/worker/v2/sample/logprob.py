@@ -23,6 +23,7 @@ from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors
 
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
+from vllm_ascend.triton_shape_dump import dump_triton_kernel_shapes
 
 
 @triton.jit
@@ -70,6 +71,26 @@ def compute_token_logprobs(logits: torch.Tensor, token_ids: torch.Tensor) -> tor
     token_ids = token_ids.to(torch.int64)
     num_logprobs = token_ids.shape[1]
     logprobs = logits.new_empty((batch_size, num_logprobs), dtype=torch.float32)
+    padded_topk = max(triton.next_power_of_2(num_logprobs), 2)
+    dump_triton_kernel_shapes(
+        "_topk_log_softmax_kernel",
+        (batch_size,),
+        {
+            "output": logprobs,
+            "logits": logits,
+            "logits_stride": logits.stride(0),
+            "topk_ids": token_ids,
+            "topk": num_logprobs,
+            "vocab_size": vocab_size,
+            "BLOCK_SIZE": 12944,
+            "PADDED_TOPK": padded_topk,
+        },
+        launch_config={
+            "vocab_tile_size": 12944,
+            "vocab_num_tiles": triton.cdiv(vocab_size, 12944),
+            "topk_tile_size": padded_topk,
+        },
+    )
     _topk_log_softmax_kernel[(batch_size,)](
         logprobs,
         logits,
@@ -78,7 +99,7 @@ def compute_token_logprobs(logits: torch.Tensor, token_ids: torch.Tensor) -> tor
         num_logprobs,
         vocab_size,
         BLOCK_SIZE=12944,
-        PADDED_TOPK=max(triton.next_power_of_2(num_logprobs), 2),
+        PADDED_TOPK=padded_topk,
         multibuffer=False,
     )
     return logprobs
@@ -149,6 +170,26 @@ def compute_topk_logprobs(
     rows_per_core = triton.cdiv(batch_size, NUM_CORES)
     BLOCK_SIZE = 8192
     grid = (NUM_CORES,)
+    dump_triton_kernel_shapes(
+        "_ranks_kernel",
+        grid,
+        {
+            "output": token_ranks,
+            "logits": logits,
+            "logits_stride": logits.stride(0),
+            "token_ids": sampled_token_ids,
+            "vocab_size": vocab_size,
+            "batch_size": batch_size,
+            "rows_per_core": rows_per_core,
+            "BLOCK_SIZE": BLOCK_SIZE,
+        },
+        launch_config={
+            "num_cores": NUM_CORES,
+            "rows_per_core": rows_per_core,
+            "vocab_tile_size": BLOCK_SIZE,
+            "vocab_num_tiles": triton.cdiv(vocab_size, BLOCK_SIZE),
+        },
+    )
     _ranks_kernel[grid](
         token_ranks,
         logits,

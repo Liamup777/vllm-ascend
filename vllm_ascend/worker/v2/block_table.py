@@ -24,6 +24,7 @@ from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm_ascend.ops.triton.v2.block_table.compute_slot_mappings import (
     _compute_slot_mappings_kernel,
 )
+from vllm_ascend.triton_shape_dump import dump_triton_kernel_shapes
 
 
 class AscendBlockTables(BlockTables):

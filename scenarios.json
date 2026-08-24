@@ -235,6 +235,61 @@
       ]
     },
     {
+      "id": "T11",
+      "name": "DFlash Input Shape Collection",
+      "purpose": "采集 _prepare_dflash_inputs_kernel_ascend 的真实小 batch、中等 batch、满 batch 与超过 256 token 的多 block 输入形状。",
+      "expected_operators": [
+        "_prepare_dflash_inputs_kernel_ascend"
+      ],
+      "model": "/mnt/weight/Qwen3-8B",
+      "replace_hot_sampling": true,
+      "engine": {
+        "max_num_batched_tokens": 8192,
+        "speculative_config": {
+          "model": "/mnt/weight/Qwen3-8B-DFlash-b16",
+          "method": "dflash",
+          "num_speculative_tokens": 8
+        }
+      },
+      "cases": [
+        {
+          "name": "dflash_r1_short",
+          "count": 1,
+          "prompt_tokens": 32,
+          "prompt_text": "Explain speculative decoding. ",
+          "sampling": {"max_tokens": 16, "temperature": 0.0, "ignore_eos": true, "seed": 42}
+        },
+        {
+          "name": "dflash_r8_medium",
+          "count": 8,
+          "prompt_tokens": 204,
+          "prompt_text": "Explain speculative decoding. ",
+          "sampling": {"max_tokens": 16, "temperature": 0.0, "ignore_eos": true, "seed": 42}
+        },
+        {
+          "name": "dflash_r64_short",
+          "count": 64,
+          "prompt_tokens": 32,
+          "prompt_text": "Explain speculative decoding. ",
+          "sampling": {"max_tokens": 16, "temperature": 0.0, "ignore_eos": true, "seed": 42}
+        },
+        {
+          "name": "dflash_r1_multiblock",
+          "count": 1,
+          "prompt_tokens": 512,
+          "prompt_text": "Explain speculative decoding. ",
+          "sampling": {"max_tokens": 16, "temperature": 0.0, "ignore_eos": true, "seed": 42}
+        },
+        {
+          "name": "dflash_r8_multiblock",
+          "count": 8,
+          "prompt_tokens": 384,
+          "prompt_text": "Explain speculative decoding. ",
+          "sampling": {"max_tokens": 16, "temperature": 0.0, "ignore_eos": true, "seed": 42}
+        }
+      ]
+    },
+    {
       "id": "T9",
       "name": "Thinking Budget Reasoning",
       "purpose": "启用 Qwen reasoning chat template 和 thinking_token_budget，覆盖 reasoning token budget 下的 marker cache 更新和 logits 强制结束逻辑。",
