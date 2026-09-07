@@ -4,7 +4,7 @@
     "device": "10",
     "profile_root": "/home/lingmutian/tmp/profile_dir",
     "warmup_rounds": 1,
-    "profile_rounds": 3,
+    "profile_rounds": 1,
     "environment": {
       "VLLM_COMPUTE_NANS_IN_LOGITS": "1"
     },
@@ -90,7 +90,7 @@
       "cases": [
         {
           "name": "text_all_features",
-          "count": 64,
+          "count": 8,
           "prompt_tokens": 256,
           "prompt_text": "Answer the question as JSON with answer and confidence fields: explain repetition in language models. ",
           "sampling": {}
@@ -105,7 +105,7 @@
         "_scatter_num_accepted_kernel",
         "precopy_mamba_align_fused_kernel"
       ],
-      "model": "/mnt/weight/Qwen3.6-35B-A3B-w8a8",
+      "model": "/mnt/weight/Qwen3.5-35B-A3B-w8a8-mtp/",
       "device": "10,11",
       "replace_hot_sampling": true,
       "engine": {
@@ -116,6 +116,7 @@
         "distributed_executor_backend": "mp",
         "gpu_memory_utilization": 0.9,
         "max_num_seqs": 8,
+        "enable_prefix_caching": true,
         "mamba_cache_mode": "align",
         "speculative_config": {
           "method": "qwen3_5_mtp",
