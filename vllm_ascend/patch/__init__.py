@@ -1417,12 +1417,11 @@
 #    How:
 #       Make logits contiguous only when the vocabulary dimension is strided,
 #       cast the keep mask to int32 before reducing it, and use a 4096-element
-#       tile to keep the corrected reduction within the NPU UB limit. Apply the
-#       override only to the three-field bitmask API; absent or different
-#       layouts are left untouched. Pack bits by transposing `[512, 8]` to
-#       `[8, 512]`, multiplying by compile-time bit weights, and reducing the
-#       contiguous 8-row axis so the backend emits vector transpose, multiply,
-#       and reduction instructions.
+#       tile to keep the corrected reduction within the NPU UB limit. Replace
+#       the three-field bitmask API directly. Pack bits by transposing
+#       `[512, 8]` to `[8, 512]`, multiplying by compile-time bit weights, and
+#       reducing the contiguous 8-row axis so the backend emits vector
+#       transpose, multiply, and reduction instructions.
 #    Test:
 #       Regression coverage is in
 #       `tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_sampling_mask.py`.

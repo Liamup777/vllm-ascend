@@ -2,13 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Regression tests for sampling-mask packing on non-contiguous logits."""
 
-import pytest
 import torch
-
-sampling_output = pytest.importorskip("vllm.v1.worker.gpu.sample.output")
-SamplingMaskTensors = getattr(sampling_output, "SamplingMaskTensors", None)
-if SamplingMaskTensors is None or len(SamplingMaskTensors._fields) != 3:
-    pytest.skip("requires the three-field sampling-mask API", allow_module_level=True)
+from vllm.v1.worker.gpu.sample.output import SamplingMaskTensors
 
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.ops.triton.v2.sample.sampling_mask import sampling_mask_from_logits_npu
