@@ -70,6 +70,20 @@ logprob._fill_logprob_token_ids_kernel = _fill_logprob_token_ids_kernel
 # For now, use the Ascend-specific implementation.
 sampler.get_num_nans = get_num_nans
 rejection_sampler.get_num_nans = get_num_nans
+try:
+    from vllm.v1.worker.gpu.sample import output as sampling_output
+except ImportError:
+    sampling_output = None
+
+if sampling_output is not None:
+    sampling_mask_tensors = getattr(sampling_output, "SamplingMaskTensors", None)
+    if sampling_mask_tensors is not None and len(sampling_mask_tensors._fields) == 3:
+        from vllm_ascend.ops.triton.v2.sample.sampling_mask import (
+            sampling_mask_from_logits_npu,
+        )
+
+        # Avoid excessive UB allocation for strided vocab-dimension loads.
+        sampling_mask_tensors.from_logits = classmethod(sampling_mask_from_logits_npu)
 # TODO: Remove after the new Q4 Triton-Ascend release is available.
 thinking_budget._load_effective_token = _load_effective_token_ascend
 # TODO: Remove after Triton-Ascend 3.6.0 is the minimum supported version.
