@@ -1,19 +1,31 @@
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
 from vllm.config import set_current_vllm_config
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
+from vllm.model_executor.layers.fused_moe.routed_experts_capturer import RoutedExpertsCapturer
 from vllm.model_executor.models.utils import sequence_parallel_chunk_impl
 
 from vllm_ascend.ops.fused_moe.prepare_finalize import (
     PrepareAndFinalizeWithAll2All,
     PrepareAndFinalizeWithAllGather,
     PrepareAndFinalizeWithMC2,
+    _capture_local_rows,
 )
 
 
 class TestPrepareAndFinalize(unittest.TestCase):
+    def test_capture_local_rows_from_v2_forward_context(self):
+        ctx = SimpleNamespace(dp_metadata=None, additional_kwargs={"num_tokens": 5})
+        with (
+            patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_forward_context", return_value=ctx),
+            patch("vllm_ascend.ascend_forward_context.get_forward_context", return_value=ctx),
+            patch("vllm_ascend.ascend_forward_context.envs_vllm.VLLM_USE_V2_MODEL_RUNNER", True),
+        ):
+            self.assertEqual(_capture_local_rows(), 5)
+
     def setUp(self):
         # Mock FusedMoEConfig
         mock_ascend_config = MagicMock()
@@ -39,6 +51,138 @@ class TestPrepareAndFinalize(unittest.TestCase):
         config_context = set_current_vllm_config(mock_vllm_config)
         config_context.__enter__()
         self.addCleanup(config_context.__exit__, None, None, None)
+
+    @patch(
+        "vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_world_size",
+        return_value=2,
+    )
+    @patch(
+        "vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_rank",
+        return_value=1,
+    )
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_forward_context")
+    def test_all2all_capture_layout_uses_actual_uneven_shards(self, mock_ctx, mock_rank, mock_size):
+        mock_ctx.return_value.dp_metadata = None
+        layer = PrepareAndFinalizeWithAll2All(self.moe_config)
+        with patch("vllm_ascend.ops.fused_moe.prepare_finalize._EXTRA_CTX", num_tokens=5):
+            prepared = layer.prepare(torch.ones(5, 8), torch.ones(5, 2), capture_enabled=True)
+
+        self.assertEqual(prepared.router_logits.shape[0], 2)
+        self.assertEqual(prepared.capture_layout.shard_sizes, (3, 2))
+        self.assertEqual(prepared.capture_layout.source_ranges, ((0, 5),))
+
+    @patch(
+        "vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_world_size",
+        return_value=2,
+    )
+    @patch(
+        "vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_rank",
+        return_value=1,
+    )
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_forward_context")
+    def test_mc2_sp_capture_layout_skips_per_shard_padding(self, mock_ctx, mock_rank, mock_size):
+        mock_ctx.return_value.dp_metadata = None
+        with (
+            patch(
+                "vllm_ascend.ops.fused_moe.prepare_finalize._EXTRA_CTX",
+                num_tokens=5,
+                padded_num_tokens=14,
+                mc2_mask=torch.arange(14) < 5,
+            ),
+        ):
+            layer = PrepareAndFinalizeWithMC2(self.moe_config)
+            prepared = layer.prepare(
+                torch.ones(3, 8),
+                torch.ones(3, 2),
+                replace_allreduce=True,
+                capture_enabled=True,
+            )
+
+        self.assertEqual(prepared.router_logits.shape[0], 7)
+        self.assertEqual(prepared.capture_layout.shard_sizes, (7, 7))
+        self.assertEqual(prepared.capture_layout.source_ranges, ((0, 3), (7, 2)))
+
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_forward_context")
+    def test_allgather_capture_layout_uses_padded_dp_offset(self, mock_ctx):
+        mock_ctx.return_value.dp_metadata.num_tokens_across_dp_cpu = torch.tensor([5, 7])
+        mock_ctx.return_value.vllm_config.parallel_config.data_parallel_rank = 1
+        self.moe_config.dp_size = 2
+        self.moe_config.is_sequence_parallel = False
+        self.moe_config.dp_group.all_gather.side_effect = lambda tensor, dim: torch.cat((tensor, tensor), dim=dim)
+
+        with patch(
+            "vllm_ascend.ops.fused_moe.prepare_finalize._EXTRA_CTX",
+            max_tokens_across_dp=7,
+        ):
+            prepared = PrepareAndFinalizeWithAllGather(self.moe_config).prepare(
+                torch.ones(7, 8), torch.ones(7, 2), capture_enabled=True
+            )
+
+        self.assertEqual(prepared.capture_layout.source_ranges, ((7, 7),))
+
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_pcp_group")
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_forward_context")
+    def test_allgather_capture_layout_selects_local_dp_pcp_block(
+        self, mock_ctx, mock_pcp_group
+    ):
+        mock_ctx.return_value.dp_metadata.num_tokens_across_dp_cpu = torch.tensor([2, 2])
+        mock_ctx.return_value.vllm_config.parallel_config.data_parallel_rank = 1
+        self.moe_config.dp_size = 2
+        self.moe_config.pcp_size = 2
+        self.moe_config.is_sequence_parallel = False
+        self.moe_config.dp_group.all_gather.side_effect = lambda tensor, dim: torch.cat(
+            (tensor, tensor + 10), dim=dim
+        )
+        mock_pcp_group.return_value.rank_in_group = 1
+        mock_pcp_group.return_value.all_gather.side_effect = lambda tensor, dim: torch.cat(
+            (tensor, tensor + 100), dim=dim
+        )
+
+        with patch(
+            "vllm_ascend.ops.fused_moe.prepare_finalize._EXTRA_CTX",
+            max_tokens_across_dp=3,
+            max_tokens_across_pcp=6,
+        ):
+            prepared = PrepareAndFinalizeWithAllGather(self.moe_config).prepare(
+                torch.ones(2, 8), torch.arange(2).float().view(2, 1), capture_enabled=True
+            )
+
+        self.assertEqual(prepared.router_logits.shape[0], 12)
+        self.assertEqual(prepared.capture_layout.source_ranges, ((9, 2),))
+        selected = RoutedExpertsCapturer._capture_with_layout(
+            prepared.router_logits, prepared.capture_layout
+        )
+        torch.testing.assert_close(selected[:, 0], torch.tensor([110.0, 111.0]))
+
+    @patch(
+        "vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_world_size",
+        return_value=2,
+    )
+    @patch(
+        "vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_rank",
+        return_value=0,
+    )
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_forward_context")
+    def test_mc2_graph_layout_uses_capacity_across_valid_counts(self, mock_ctx, mock_rank, mock_size):
+        mock_ctx.return_value.dp_metadata = None
+        layouts = []
+        with patch(
+            "vllm_ascend.ops.fused_moe.prepare_finalize._EXTRA_CTX",
+            num_tokens=14,
+            padded_num_tokens=14,
+        ) as extra_ctx:
+            for valid_rows in (5, 7):
+                extra_ctx.mc2_mask = torch.arange(14) < valid_rows
+                prepared = PrepareAndFinalizeWithMC2(self.moe_config).prepare(
+                    torch.ones(7, 8),
+                    torch.ones(7, 2),
+                    replace_allreduce=True,
+                    capture_enabled=True,
+                )
+                layouts.append(prepared.capture_layout)
+
+        self.assertEqual(layouts[0].shard_sizes, layouts[1].shard_sizes)
+        self.assertEqual(layouts[0].source_ranges, layouts[1].source_ranges)
 
     @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_world_size", return_value=1)
     @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_rank", return_value=0)

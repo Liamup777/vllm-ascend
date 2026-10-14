@@ -26,7 +26,11 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
+from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+    RoutedExpertsCaptureLayout,
+)
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
@@ -35,6 +39,26 @@ from vllm_ascend.ops.fused_moe.dataclass.prepare_finalize import MoEPrepareOutpu
 from vllm_ascend.ops.fused_moe.moe_utils import _pad_tokens_with_cat
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.quantization.utils import get_dynamic_mx_quant_scale_alg
+
+
+def _capture_local_rows() -> int:
+    ctx = get_forward_context()
+    if ctx.dp_metadata is not None:
+        rank = ctx.vllm_config.parallel_config.data_parallel_rank
+        return int(ctx.dp_metadata.num_tokens_across_dp_cpu[rank].item())
+    return _EXTRA_CTX.num_tokens
+
+
+def _tp_capture_layout(
+    tp_group,
+    shard_sizes: tuple[int, ...],
+    source_ranges: tuple[tuple[int, int], ...],
+) -> RoutedExpertsCaptureLayout:
+    return RoutedExpertsCaptureLayout(
+        source_ranges=source_ranges,
+        gather_group=tp_group.device_group if len(shard_sizes) > 1 else None,
+        shard_sizes=shard_sizes if len(shard_sizes) > 1 else (),
+    )
 
 
 class PrepareAndFinalize(ABC):
@@ -64,6 +88,7 @@ class PrepareAndFinalize(ABC):
         router_logits: torch.Tensor,
         replace_allreduce: bool = False,
         quant_type: QuantType = QuantType.NONE,
+        capture_enabled: bool = False,
     ) -> MoEPrepareOutput:
         """
         Prepare tensors before MoE computation. May involve:
@@ -132,6 +157,7 @@ class PrepareAndFinalizeWithAll2All(PrepareAndFinalize):
         router_logits: torch.Tensor,
         replace_allreduce: bool = False,
         quant_type=QuantType.NONE,
+        capture_enabled: bool = False,
     ) -> MoEPrepareOutput:
         """
         Preparation steps:
@@ -171,12 +197,28 @@ class PrepareAndFinalizeWithAll2All(PrepareAndFinalize):
                 hidden_states = split_hidden_states[self.tp_rank]
                 router_logits = split_router_logits[self.tp_rank]
 
+        capture_layout = None
+        if capture_enabled:
+            if self.replace_allreduce:
+                shard_sizes = (router_logits.shape[0],) * self.tp_size
+            else:
+                shard_sizes = (
+                    tuple(shard.shape[0] for shard in split_router_logits)
+                    if self.tp_size > 1
+                    else (router_logits.shape[0],)
+                )
+            capture_layout = _tp_capture_layout(
+                self.moe_config.tp_group,
+                shard_sizes,
+                ((0, _capture_local_rows()),),
+            )
         return MoEPrepareOutput(
             hidden_states=hidden_states,
             router_logits=router_logits,
             mc2_mask=None,
             padded_hidden_states_shape=padded_hidden_states_shape,
             pertoken_scale=None,
+            capture_layout=capture_layout,
         )
 
     def pad_and_split_input_ids(
@@ -255,6 +297,7 @@ class PrepareAndFinalizeWithMC2(PrepareAndFinalizeWithAll2All):
         router_logits: torch.Tensor,
         replace_allreduce: bool = False,
         quant_type=QuantType.NONE,
+        capture_enabled: bool = False,
     ) -> MoEPrepareOutput:
         """
         Preparation steps:
@@ -271,6 +314,7 @@ class PrepareAndFinalizeWithMC2(PrepareAndFinalizeWithAll2All):
         """
         self.replace_allreduce = replace_allreduce
         mc2_mask = _EXTRA_CTX.mc2_mask
+        local_rows = _capture_local_rows() if capture_enabled else 0
         if self.replace_allreduce:
             # SP shards use the local token count, not the largest DP batch.
             # Select valid bits before adding padding for uniform MC2 batches.
@@ -282,6 +326,12 @@ class PrepareAndFinalizeWithMC2(PrepareAndFinalizeWithAll2All):
                 hidden_states = nn.functional.pad(hidden_states, (0, 0, 0, pad_size))
                 router_logits = nn.functional.pad(router_logits, (0, 0, 0, pad_size))
                 mc2_mask = nn.functional.pad(mc2_mask, (0, pad_size), value=False)
+            if capture_enabled:
+                physical_rows = hidden_states.shape[0]
+                source_ranges = tuple(
+                    (rank * physical_rows, min(self.num_tokens, max(0, local_rows - rank * self.num_tokens)))
+                    for rank in range(self.tp_size)
+                )
         elif self.tp_size > 1:
             # Also slice mc2_mask
             split_mc2_mask = torch.tensor_split(mc2_mask, self.tp_size, dim=0)
@@ -289,6 +339,8 @@ class PrepareAndFinalizeWithMC2(PrepareAndFinalizeWithAll2All):
 
         padded_hidden_states_shape = hidden_states.shape
         if not self.replace_allreduce:
+            if capture_enabled:
+                source_ranges = ((0, local_rows),)
             self.num_tokens, _ = hidden_states.shape
             target_pad_length = _EXTRA_CTX.padded_num_tokens
             pad_size = target_pad_length - self.num_tokens
@@ -305,12 +357,17 @@ class PrepareAndFinalizeWithMC2(PrepareAndFinalizeWithAll2All):
                 hidden_states = split_hidden_states[self.tp_rank]
                 router_logits = split_router_logits[self.tp_rank]
 
+        capture_layout = None
+        if capture_enabled:
+            shard_sizes = (router_logits.shape[0],) * self.tp_size
+            capture_layout = _tp_capture_layout(self.moe_config.tp_group, shard_sizes, source_ranges)
         return MoEPrepareOutput(
             hidden_states=hidden_states,
             router_logits=router_logits,
             mc2_mask=mc2_mask,
             padded_hidden_states_shape=padded_hidden_states_shape,
             pertoken_scale=None,
+            capture_layout=capture_layout,
         )
 
     def finalize(
@@ -385,6 +442,7 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         router_logits: torch.Tensor,
         replace_allreduce: bool = False,
         quant_type=QuantType.NONE,
+        capture_enabled: bool = False,
     ) -> MoEPrepareOutput:
         """
         Preparation steps:
@@ -394,12 +452,18 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
             MoEPrepareOutput with global tensors.
         """
         if self._use_ep_sequence_parallel():
-            return self._prepare_with_ep_group(hidden_states, router_logits, quant_type)
+            return self._prepare_with_ep_group(hidden_states, router_logits, quant_type, capture_enabled)
 
-        return self._prepare_with_dp_group(hidden_states, router_logits, replace_allreduce)
+        return self._prepare_with_dp_group(
+            hidden_states, router_logits, replace_allreduce, capture_enabled=capture_enabled
+        )
 
     def _prepare_with_ep_group(
-        self, hidden_states: torch.Tensor, router_logits: torch.Tensor, quant_type=QuantType.NONE
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+        quant_type=QuantType.NONE,
+        capture_enabled: bool = False,
     ) -> MoEPrepareOutput:
         pertoken_scale = None
         if quant_type == QuantType.W8A8:
@@ -425,12 +489,28 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         if pertoken_scale is not None:
             pertoken_scale = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(pertoken_scale)
 
+        capture_layout = None
+        if capture_enabled:
+            ctx = get_forward_context()
+            local_rows = _capture_local_rows()
+            if ctx.dp_metadata is not None and ctx.dp_metadata.local_sizes is not None:
+                sizes = ctx.dp_metadata.local_sizes
+                dp_rank = ctx.vllm_config.parallel_config.data_parallel_rank
+                shards_per_dp = len(sizes) // len(ctx.dp_metadata.num_tokens_across_dp_cpu)
+                start = sum(sizes[: dp_rank * shards_per_dp])
+            elif ctx.dp_metadata is not None:
+                dp_rank = ctx.vllm_config.parallel_config.data_parallel_rank
+                start = int(ctx.dp_metadata.num_tokens_across_dp_cpu[:dp_rank].sum().item())
+            else:
+                start = 0
+            capture_layout = RoutedExpertsCaptureLayout(((start, local_rows),))
         return MoEPrepareOutput(
             hidden_states=hidden_states,
             router_logits=router_logits,
             mc2_mask=None,
             padded_hidden_states_shape=None,
             pertoken_scale=pertoken_scale,
+            capture_layout=capture_layout,
         )
 
     def _prepare_with_dp_group(
@@ -439,6 +519,7 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         router_logits: torch.Tensor,
         replace_allreduce: bool = False,
         quant_type=QuantType.NONE,
+        capture_enabled: bool = False,
     ) -> MoEPrepareOutput:
         """
         Preparation steps:
@@ -480,12 +561,25 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
                 dim=0,
             )
 
+        capture_layout = None
+        if capture_enabled:
+            ctx = get_forward_context()
+            local_rows = _capture_local_rows()
+            dp_rank = ctx.vllm_config.parallel_config.data_parallel_rank
+            dp_offset = dp_rank * _EXTRA_CTX.max_tokens_across_dp if self.moe_config.dp_size > 1 else 0
+            pcp_offset = (
+                get_pcp_group().rank_in_group * _EXTRA_CTX.max_tokens_across_pcp
+                if self.moe_config.pcp_size > 1
+                else 0
+            )
+            capture_layout = RoutedExpertsCaptureLayout(((pcp_offset + dp_offset, local_rows),))
         return MoEPrepareOutput(
             hidden_states=hidden_states,
             router_logits=router_logits,
             mc2_mask=None,
             padded_hidden_states_shape=None,
             pertoken_scale=None,
+            capture_layout=capture_layout,
         )
 
     def all_gather_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:

@@ -17,6 +17,9 @@
 from dataclasses import dataclass
 
 import torch
+from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+    RoutedExpertsCaptureLayout,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,3 +31,4 @@ class MoEPrepareOutput:
     mc2_mask: torch.Tensor | None
     padded_hidden_states_shape: torch.Size | None
     pertoken_scale: torch.Tensor | None = None
+    capture_layout: RoutedExpertsCaptureLayout | None = None
