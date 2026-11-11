@@ -1,0 +1,8 @@
+pr: 21587
+entries:
+  - category: performance
+    text: >-
+      With `VLLM_USE_V2_MODEL_RUNNER=1` and EPLB enabled, DeepSeek V4.1 Flash
+      now combines expert mapping with GatingTopK when the custom operator is
+      available. This avoids a separate Map operator without a new setting.
+    model: deepseek-v4.1
