@@ -566,6 +566,12 @@ if (BUILD_OPS_RTY_KERNEL)
                 OPTIONAL
         )
 
+        install(DIRECTORY ${op_dir}/op_kernel/ordinary
+                DESTINATION ${IMPL_INSTALL_DIR}/ascendc/${_op_name}
+                OPTIONAL
+                FILES_MATCHING PATTERN "*.h"
+        )
+
         install(DIRECTORY ${op_dir}/arch32
             DESTINATION ${IMPL_INSTALL_DIR}/ascendc/${_op_name}
             OPTIONAL

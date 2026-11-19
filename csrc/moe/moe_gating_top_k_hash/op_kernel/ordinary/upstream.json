@@ -1,0 +1,18 @@
+{
+  "repository": "https://gitcode.com/cann/ops-transformer",
+  "revision": "66881f9a79f83f0e1c44902fe2c92eaceb26aecf",
+  "directory": "moe/moe_gating_top_k/op_kernel/arch35",
+  "files": [
+    "moe_gating_top_k_regbase.h",
+    "moe_gating_top_k_without_group_regbase.h",
+    "moe_gating_top_k_arch35_common.h"
+  ],
+  "adaptations": [
+    "Isolated namespace and include guards; reuse the custom operator tiling structure.",
+    "Replace external load/store helpers with local FP32 and round-to-nearest dtype adapters.",
+    "Initialize EPLB map buffers and map final logical IDs immediately before copying IDs to GM.",
+    "Host dispatch admits only ordinary softmax/sigmoid with more than one expert; other modes use existing kernels.",
+    "Host batch budget includes all fixed allocations (including indexBuf) plus EPLB map buffers."
+  ],
+  "validation": "Source arithmetic comparison only; CANN compilation and A3/A5 numerical validation are required."
+}

@@ -13,6 +13,7 @@
  * \brief
  */
 #include "moe_gating_top_k_hash_tiling.h"
+#include <algorithm>
 #include <graph/utils/type_utils.h>
 
 namespace optiling {
@@ -23,6 +24,8 @@ const static uint64_t MOE_GATING_TOP_K_REGBASE_TILING_KEY_1 = 10001;
 const static uint64_t MOE_GATING_TOP_K_REGBASE_TILING_KEY_2 = 10002;
 const static uint64_t MOE_GATING_TOP_K_REGBASE_TILING_KEY_3 = 10003;
 const static uint64_t MOE_GATING_TOP_K_REGBASE_TILING_KEY_4 = 10004;
+const static uint64_t MOE_GATING_TOP_K_ORDINARY_WITHOUT_GROUP_KEY = 10005;
+const static uint64_t MOE_GATING_TOP_K_ORDINARY_GROUPED_KEY = 10006;
 
 const static int64_t GROUP_SELECT_MODE_MAX = 0;
 const static int64_t GROUP_SELECT_MODE_SUM = 1;
@@ -112,6 +115,8 @@ private:
     ge::graphStatus CheckOutShape();
     void CalTmpBufUbSize();
     void SplitRows();
+    bool IsOrdinaryPath() const;
+    ge::graphStatus SetOrdinaryBatchRows();
     void Tiling4GatherOutComputeSplitK();
 
     const gert::Shape *xShape_ = nullptr;
@@ -127,6 +132,7 @@ private:
     ge::DataType tid2eidDtype = ge::DT_INT32;
 
     uint64_t coreNum_ = 0;
+    uint64_t ubSize_ = 0;
     int64_t rows_ = 0;
     int64_t expertCount_ = 0;
     int64_t addBias_ = 0;
@@ -485,8 +491,7 @@ ge::graphStatus MoeGatingTopKHashTilingRegbase::GetPlatformInfo()
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfo);
     coreNum_ = ascendcPlatform.GetCoreNumAiv();
     socVersion_ = ascendcPlatform.GetSocVersion();
-    uint64_t ubSizePlatForm;
-    ascendcPlatform.GetCoreMemSize(platform_ascendc::CoreMemType::UB, ubSizePlatForm);
+    ascendcPlatform.GetCoreMemSize(platform_ascendc::CoreMemType::UB, ubSize_);
     return ge::GRAPH_SUCCESS;
 }
 
@@ -570,6 +575,55 @@ void MoeGatingTopKHashTilingRegbase::SplitRows()
     moeGatingTopKTilingData_.set_vmsCount(vmsCount);
 }
 
+bool MoeGatingTopKHashTilingRegbase::IsOrdinaryPath() const
+{
+    // Python uses SUM-of-top2 group scoring, which excludes a single expert.
+    // Keep direct single-expert calls on the legacy path (no batched map).
+    return (normType_ == NORM_TYPE_SOFTMAX || normType_ == NORM_TYPE_SIGMOID) &&
+           inputIdsShape_ == nullptr && tid2eidShape_ == nullptr && !addBiasVl_ && expertCount_ > 1;
+}
+
+ge::graphStatus MoeGatingTopKHashTilingRegbase::SetOrdinaryBatchRows()
+{
+    constexpr int64_t blockBytes = 32;
+    constexpr int64_t maxBatchRows = 128;
+    moeGatingTopKTilingData_.set_batchRows(1);
+    if (!IsOrdinaryPath()) {
+        return ge::GRAPH_SUCCESS;
+    }
+    auto alignBytes = [](int64_t bytes) { return (bytes + 31) / 32 * 32; };
+    const int64_t mapUb = moeGatingTopKTilingData_.get_routingTableRows() > 0 ?
+        alignBytes(expertCount_ * sizeof(int32_t)) + alignBytes(k_ * sizeof(int32_t)) : 0;
+    const int64_t available = static_cast<int64_t>(ubSize_) - mapUb;
+    if (kGroup_ == groupCount_ || groupCount_ == expertCount_) {
+        // CANN's WithoutGroupRegbase budget, with the EPLB buffers reserved.
+        const int64_t alignedExperts = (expertCount_ + 31) / 32 * 32;
+        const int64_t dtypeRatio = sizeof(float) / inputDtypeSize_;
+        const int64_t blockElements = blockBytes / inputDtypeSize_;
+        const int64_t kStride = (k_ + blockElements - 1) / blockElements * blockElements;
+        // Include indexBuf_ too: actual fixed allocations total 17 + dtypeRatio.
+        const int64_t fixedUb = alignedExperts * sizeof(float) * (17 + dtypeRatio);
+        const int64_t perRowUb = (alignedExperts * sizeof(float) * dtypeRatio +
+                                 kStride * (sizeof(float) + sizeof(int32_t))) * 2;
+        OPS_ERR_IF(available < fixedUb + perRowUb,
+                   OPS_LOG_E(context_, "Insufficient UB for ordinary gating and EPLB mapping"),
+                   return ge::GRAPH_FAILED);
+        moeGatingTopKTilingData_.set_batchRows(std::min(maxBatchRows, (available - fixedUb) / perRowUb));
+    } else {
+        // Match all explicitly allocated queues/buffers in ordinary Regbase.
+        const int64_t alignedExperts = groupCount_ * moeGatingTopKTilingData_.get_perGroupExpertCountAlign();
+        const int64_t alignedGroups = (groupCount_ + 31) / 32 * 32;
+        const int64_t required = alignedExperts *
+            (2 * sizeof(float) * (sizeof(float) / inputDtypeSize_) + inputDtypeSize_ + 9 * sizeof(float)) +
+            2 * alignBytes(k_ * inputDtypeSize_) + 2 * alignBytes(k_ * sizeof(int32_t)) +
+            alignedGroups * 3 * sizeof(float);
+        OPS_ERR_IF(available < required,
+                   OPS_LOG_E(context_, "Insufficient UB for grouped gating and EPLB mapping"),
+                   return ge::GRAPH_FAILED);
+    }
+    return ge::GRAPH_SUCCESS;
+}
+
 ge::graphStatus MoeGatingTopKHashTilingRegbase::DoOpTiling()
 {
     auto ret = GetPlatformInfo();
@@ -599,6 +653,10 @@ ge::graphStatus MoeGatingTopKHashTilingRegbase::DoOpTiling()
 
     CalTmpBufUbSize();
     SplitRows();
+    ret = SetOrdinaryBatchRows();
+    if (ret != ge::GRAPH_SUCCESS) {
+        return ret;
+    }
 
     ret = PostTiling();
     if (ret != ge::GRAPH_SUCCESS) {
@@ -633,6 +691,11 @@ ge::graphStatus MoeGatingTopKHashTilingRegbase::PostTiling()
 
 uint64_t MoeGatingTopKHashTilingRegbase::GetTilingKey() const
 {
+    if (IsOrdinaryPath()) {
+        // 10000 remains the legacy hash/vision/sqrtsoftplus implementation.
+        return (kGroup_ == groupCount_ || groupCount_ == expertCount_) ?
+            MOE_GATING_TOP_K_ORDINARY_WITHOUT_GROUP_KEY : MOE_GATING_TOP_K_ORDINARY_GROUPED_KEY;
+    }
     if (inputIdsShape_ == nullptr) {
       return MOE_GATING_TOP_K_REGBASE_TILING_KEY;
     } else if (inputIdsDtype == ge::DataType::DT_INT32 && tid2eidDtype == ge::DataType::DT_INT64) {

@@ -85,8 +85,11 @@ TILING_DATA_FIELD_DEF(int64_t, vmsCount);
 TILING_DATA_FIELD_DEF(float, routedScalingFactor);
 TILING_DATA_FIELD_DEF(float, eps);
 TILING_DATA_FIELD_DEF_STRUCT(SoftMaxTiling, softmaxTilingData);
+TILING_DATA_FIELD_DEF(int64_t, batchRows);
 END_TILING_DATA_DEF;
 REGISTER_TILING_DATA_CLASS(MoeGatingTopKHash_10000, MoeGatingTopKHashRegbaseTilingData)
+REGISTER_TILING_DATA_CLASS(MoeGatingTopKHash_10005, MoeGatingTopKHashRegbaseTilingData)
+REGISTER_TILING_DATA_CLASS(MoeGatingTopKHash_10006, MoeGatingTopKHashRegbaseTilingData)
 struct MoeGatingTopKHashCompileInfo {};
 } // namespace optiling
 #endif // AIR_CXX_RUNTIME_V2_OP_IMPL_MOE_GATING_TOP_K_H

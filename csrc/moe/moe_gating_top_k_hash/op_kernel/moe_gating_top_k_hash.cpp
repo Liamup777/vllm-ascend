@@ -18,6 +18,8 @@
 #include "moe_gating_top_k_hash_generalized.h"
 #if defined(__DAV_C310__)
   #include "moe_gating_top_k_hash_regbase.h"
+  #include "ordinary/moe_gating_top_k_regbase.h"
+  #include "ordinary/moe_gating_top_k_without_group_regbase.h"
   using namespace MoeGatingTopKHashRegbaseNS;
 #endif
 #define TILING_KEY_PER_GROUP_COUNT_32 0
@@ -32,6 +34,8 @@
 #define TILING_KEY_REGBASE_2 10002
 #define TILING_KEY_REGBASE_3 10003
 #define TILING_KEY_REGBASE_4 10004
+#define TILING_KEY_ORDINARY_WITHOUT_GROUP 10005
+#define TILING_KEY_ORDINARY_GROUPED 10006
 
 using namespace AscendC;
 using namespace MoeGatingTopKHash;
@@ -99,7 +103,17 @@ extern "C" __global__ __aicore__ void moe_gating_top_k_hash(GM_ADDR x, GM_ADDR b
         op.Process();
     }
     #if defined(__DAV_C310__)
-      else if (TILING_KEY_IS(TILING_KEY_REGBASE)) {
+      else if (TILING_KEY_IS(TILING_KEY_ORDINARY_WITHOUT_GROUP)) {
+          GET_TILING_DATA_WITH_STRUCT(MoeGatingTopKHashRegbaseTilingData, tilingData, tiling);
+          MoeGatingTopKOrdinary::MoeGatingTopKWithoutGroupRegbase<DTYPE_X> op;
+          op.Init(x, bias, routingTable, y, expertIdx, out, userWS, &tilingData, &tPipe);
+          op.Process();
+      } else if (TILING_KEY_IS(TILING_KEY_ORDINARY_GROUPED)) {
+          GET_TILING_DATA_WITH_STRUCT(MoeGatingTopKHashRegbaseTilingData, tilingData, tiling);
+          MoeGatingTopKOrdinary::MoeGatingTopKRegbase<DTYPE_X> op;
+          op.Init(x, bias, routingTable, y, expertIdx, out, userWS, &tilingData, &tPipe);
+          op.Process();
+      } else if (TILING_KEY_IS(TILING_KEY_REGBASE)) {
           GET_TILING_DATA_WITH_STRUCT(MoeGatingTopKHashRegbaseTilingData, tiling_data_in, tiling);
           const MoeGatingTopKHashRegbaseTilingData *__restrict tilingData = &tiling_data_in;
           MoeGatingTopKHashRegbase<DTYPE_X, int32_t, int32_t> op;

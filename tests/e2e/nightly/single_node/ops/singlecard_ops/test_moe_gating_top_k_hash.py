@@ -54,9 +54,10 @@ def test_ordinary_map_meta(norm_type, renorm):
 @pytest.mark.parametrize("groups,selected_groups", [(1, 1), (8, 4)])
 def test_ordinary_map_graph_observes_table_updates(norm_type, renorm, groups, selected_groups):
     torch.manual_seed(179)
-    rows, experts = 17, 256
+    # Cross both the per-core batch limit and the last-core tail.
+    rows, experts = 32771, 256
     logits = torch.randn(rows, experts, device="npu")
-    table = torch.arange(experts, device="npu", dtype=torch.int32).repeat(3, 1)
+    table = torch.arange(3 * experts, device="npu", dtype=torch.int32).reshape(3, experts)
     kwargs = dict(
         k=8,
         k_group=selected_groups,
@@ -89,7 +90,7 @@ def test_ordinary_map_graph_observes_table_updates(norm_type, renorm, groups, se
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
 @pytest.mark.parametrize(
     "experts,groups,selected_groups,top_k",
-    [(256, 1, 1, 8), (256, 8, 4, 8), (240, 8, 4, 8), (256, 8, 8, 8), (512, 8, 4, 80), (480, 8, 4, 80)],
+    [(32, 1, 1, 1), (256, 1, 1, 8), (256, 8, 4, 8), (240, 8, 4, 8), (256, 8, 8, 8), (512, 8, 4, 80), (480, 8, 4, 80)],
 )
 @pytest.mark.parametrize("with_bias", [False, True])
 def test_ordinary_gating_map_matches_cann(norm_type, renorm, dtype, experts, groups, selected_groups, top_k, with_bias):
@@ -114,10 +115,13 @@ def test_ordinary_gating_map_matches_cann(norm_type, renorm, dtype, experts, gro
         bias=bias,
     )
     expected_weights, logical_ids, expected_scores = torch_npu.npu_moe_gating_top_k(logits, **kwargs)
+    unmapped_weights, unmapped_ids, _ = torch.ops._C_ascend.moe_gating_top_k_hash(logits, **kwargs)
     actual_weights, physical_ids, actual_scores = torch.ops._C_ascend.moe_gating_top_k_hash(
         logits, expert_replica_routing_table=table, **kwargs
     )
     expected_ids = table[torch.arange(rows, device="npu")[:, None] % period, logical_ids.long()]
+    torch.testing.assert_close(unmapped_ids, logical_ids, rtol=0, atol=0)
+    torch.testing.assert_close(actual_weights, unmapped_weights, rtol=0, atol=0)
     torch.testing.assert_close(physical_ids, expected_ids, rtol=0, atol=0)
     tolerance = {torch.float32: 1e-6, torch.float16: 2e-3, torch.bfloat16: 2e-2}[dtype]
     torch.testing.assert_close(actual_weights, expected_weights, rtol=tolerance, atol=1e-7)

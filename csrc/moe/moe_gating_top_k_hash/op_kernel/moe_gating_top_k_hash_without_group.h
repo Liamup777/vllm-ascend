@@ -182,9 +182,9 @@ __aicore__ inline void MoeGatingTopKHashWithoutGroup<T, U1, U2>::ComputeX(bool u
         eventIdSToV = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::S_V));
         SetFlag<HardEvent::S_V>(eventIdSToV);
         WaitFlag<HardEvent::S_V>(eventIdSToV);
-        Duplicate(calcTmp, sumValue, expertCount_);
+        Duplicate(xInLocalTensor, sumValue, expertCount_);
         PipeBarrier<PIPE_V>();
-        Div(xNormTensor, xNormTensor, calcTmp, expertCount_);
+        Div(xNormTensor, xNormTensor, xInLocalTensor, expertCount_);
         PipeBarrier<PIPE_V>();
     } else {
         LocalTensor<float> calcNormTmpTensor = calcTmpBuf_.Get<float>();
