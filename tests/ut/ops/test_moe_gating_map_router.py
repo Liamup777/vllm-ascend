@@ -91,10 +91,64 @@ def test_capture_configured_before_routing_uses_standalone_map():
     assert not router._use_gating_top_k_with_map
 
 
-@pytest.mark.parametrize("kwargs", [{"scoring_func": "softmax"}, {"scoring_func": "sigmoid"}, {"num_expert_group": 2}])
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"scoring_func": "sigmoid", "renormalize": False},
+        {"num_expert_group": 2},
+    ],
+)
 def test_unsupported_configuration_falls_back(kwargs):
     router, logits, _ = make_router(**kwargs)
     assert routing_table_used(router, logits) is None
+
+
+@pytest.mark.parametrize(
+    "scoring_func,renormalize,norm_type", [("softmax", False, 0), ("softmax", True, 0), ("sigmoid", True, 1)]
+)
+@pytest.mark.parametrize("groups,selected_groups", [(1, 1), (8, 4), (8, 8)])
+def test_ordinary_fusion_forwards_native_parameters(scoring_func, renormalize, norm_type, groups, selected_groups):
+    router, logits, table = make_router(
+        scoring_func=scoring_func,
+        renormalize=renormalize,
+        num_expert_group=groups,
+        topk_group=selected_groups,
+    )
+    expected = (torch.ones(3, 2), torch.full((3, 2), 2050, dtype=torch.int32), None)
+    with (
+        patch.object(module, "use_allgather_eplb", return_value=False),
+        patch.object(torch.ops._C_ascend, "moe_gating_top_k_hash", return_value=expected, create=True) as op,
+        patch.object(module.torch_npu, "npu_moe_gating_top_k", create=True) as native,
+        patch.object(torch.ops.vllm, "ascend_eplb_map_to_physical", create=True) as standalone,
+    ):
+        weights, ids = router._select_experts(logits, logits, torch.int64)
+    native.assert_not_called()
+    standalone.assert_not_called()
+    assert weights is expected[0]
+    assert ids.dtype == torch.int64
+    assert torch.all(ids == 2050)
+    kwargs = op.call_args.kwargs
+    assert kwargs["norm_type"] == norm_type
+    assert kwargs["renorm"] == int(renormalize)
+    assert kwargs["group_count"] == groups
+    assert kwargs["k_group"] == selected_groups
+    assert kwargs["expert_replica_routing_table"] is table
+    assert "input_ids" not in kwargs and "tid2eid" not in kwargs and "bias_vl" not in kwargs
+
+
+@pytest.mark.parametrize("scoring_func", ["softmax", "sigmoid"])
+@pytest.mark.parametrize("reason", ["capture", "no_eplb", "hash", "vision"])
+def test_ordinary_fusion_eligibility(scoring_func, reason):
+    router, logits, _ = make_router(scoring_func=scoring_func, renormalize=True)
+    if reason == "capture":
+        router.capture_fn = Mock()
+    elif reason == "no_eplb":
+        router.eplb_state = None
+    elif reason == "hash":
+        router.tid2eid = torch.zeros(3, 2, dtype=torch.int32)
+    else:
+        router.bias_vl = torch.zeros(2048)
+    assert not router._can_fuse_gating_map(logits)
 
 
 @pytest.mark.parametrize("allgather", [False, True])

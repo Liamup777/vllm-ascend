@@ -1116,7 +1116,7 @@ namespace MoeGatingTopKHashRegbaseNS
         __local_mem__ uint32_t *expertIdxAddr = (__local_mem__ uint32_t *)expertIdxTensor.GetPhyAddr();
         __local_mem__ T *outputAddr = (__local_mem__ T *)yTensor.GetPhyAddr();
 
-        if (tilingData_->normType == 0)
+        if (tilingData_->normType == 0 && tilingData_->renorm == 0)
         {
             __VEC_SCOPE__
             {
@@ -1168,7 +1168,7 @@ namespace MoeGatingTopKHashRegbaseNS
         __local_mem__ uint32_t *expertIdxAddr = (__local_mem__ uint32_t *)expertIdxTensor.GetPhyAddr();
         __local_mem__ T *outputAddr = (__local_mem__ T *)yTensor.GetPhyAddr();
 
-        if (tilingData_->normType == 0)
+        if (tilingData_->normType == 0 && tilingData_->renorm == 0)
         {
             __VEC_SCOPE__
             {
@@ -1261,7 +1261,7 @@ namespace MoeGatingTopKHashRegbaseNS
         __local_mem__ uint32_t *expertIdxAddr = (__local_mem__ uint32_t *)expertIdxTensor.GetPhyAddr();
         __local_mem__ T *outputAddr = (__local_mem__ T *)yTensor.GetPhyAddr();
 
-        if (tilingData_->normType == 0)
+        if (tilingData_->normType == 0 && tilingData_->renorm == 0)
         {
             __VEC_SCOPE__
             {
@@ -1334,7 +1334,7 @@ namespace MoeGatingTopKHashRegbaseNS
         __local_mem__ uint32_t *expertIdxAddr = (__local_mem__ uint32_t *)expertIdxTensor.GetPhyAddr();
         __local_mem__ T *outputAddr = (__local_mem__ T *)yTensor.GetPhyAddr();
 
-        if (tilingData_->normType == 0)
+        if (tilingData_->normType == 0 && tilingData_->renorm == 0)
         {
             __VEC_SCOPE__
             {

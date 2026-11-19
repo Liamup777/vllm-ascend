@@ -145,10 +145,19 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
         return (
             self.eplb_state is not None
             and self.capture_fn is None
-            and self.scoring_func == "sqrtsoftplus"
-            and self.num_expert_group in (None, 1)
-            and self.topk_group in (None, 1)
-            and (self.bias_vl is None or profile.supports(HardwareCapability.MOE_GATING_TOP_K_HASH_VISION))
+            and (
+                (
+                    self.scoring_func == "sqrtsoftplus"
+                    and self.num_expert_group in (None, 1)
+                    and self.topk_group in (None, 1)
+                    and (self.bias_vl is None or profile.supports(HardwareCapability.MOE_GATING_TOP_K_HASH_VISION))
+                )
+                or (
+                    (self.scoring_func == "softmax" or (self.scoring_func == "sigmoid" and self.renormalize))
+                    and self.tid2eid is None
+                    and self.bias_vl is None
+                )
+            )
             and self.is_fused_supported(hidden_states)
         )
 
@@ -242,7 +251,7 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
                 routed_scaling_factor=self.routed_scaling_factor,
                 eps=1e-20,
                 group_select_mode=1,
-                # The hash custom op currently accepts only renorm=0.
+                # Keep the legacy sqrtsoftplus normalization contract.
                 renorm=0,
                 norm_type=2,
                 out_flag=False,
@@ -255,6 +264,22 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
         norm_type = 0 if self.scoring_func == "softmax" else 1
         if self.e_score_correction_bias is not None and self.e_score_correction_bias.dtype != router_logits.dtype:
             self.e_score_correction_bias = self.e_score_correction_bias.to(router_logits.dtype)
+        if self._use_gating_top_k_with_map:
+            topk_weights, topk_ids, _ = torch.ops._C_ascend.moe_gating_top_k_hash(
+                x=router_logits,
+                k=self.top_k,
+                k_group=topk_group,
+                group_count=num_expert_group,
+                group_select_mode=1,
+                renorm=renorm,
+                norm_type=norm_type,
+                out_flag=False,
+                routed_scaling_factor=self.routed_scaling_factor,
+                eps=1e-20,
+                bias=self.e_score_correction_bias,
+                expert_replica_routing_table=self._get_gating_map_table(),
+            )
+            return topk_weights, topk_ids
         topk_weights, topk_ids, _ = torch_npu.npu_moe_gating_top_k(
             router_logits,
             k=self.top_k,
